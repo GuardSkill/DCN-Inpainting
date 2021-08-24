@@ -54,7 +54,7 @@ class DeformableConv2d(nn.Module):
         stdv = 1. / math.sqrt(n)
         self.weight.data.uniform_(-stdv, stdv)
         self.bias.data.zero_()
-
+        self.stride=stride
         nn.init.constant_(self.offset_conv.weight, 0.)
         nn.init.constant_(self.offset_conv.bias, 0.)
 
@@ -70,7 +70,8 @@ class DeformableConv2d(nn.Module):
                                           weight=self.weight,
                                           bias=self.bias,
                                           padding=self.padding,
-                                          mask=mask)
+                                          mask=mask,
+                                          stride=self.stride)
 
         return x
 

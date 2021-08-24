@@ -18,7 +18,7 @@ def main(mode=None):
     Args:
         mode (int): 1: train, 2: test, 3: eval, reads from config file if not specified
     """
-    torch.autograd.set_detect_anomaly(True)
+    # torch.autograd.set_detect_anomaly(True)
     config = load_config(mode)
     # set cuda visble devices from config file
     os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(str(e) for e in config.GPU)

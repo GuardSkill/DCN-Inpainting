@@ -240,7 +240,7 @@ class CLFNet():
                 logs = {}
                 # run model
 
-                start = time.clock()
+                start = time.time()
                 outputs = self.inpaint_model(images, masks)
                 elapsed = (time.clock() - start)
                 print("Inference Time used:", elapsed)

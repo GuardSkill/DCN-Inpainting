@@ -21,9 +21,7 @@ class DeformableConv2d(nn.Module):
                  kernel_size=(3, 3),
                  stride=1,
                  padding=1,
-                 groups=1,
-                 bias=False):
-
+                 groups=1):
         super(DeformableConv2d, self).__init__()
         self.padding = padding
 
@@ -54,12 +52,13 @@ class DeformableConv2d(nn.Module):
         stdv = 1. / math.sqrt(n)
         self.weight.data.uniform_(-stdv, stdv)
         self.bias.data.zero_()
-        self.stride=stride
+        self.stride = stride
         nn.init.constant_(self.offset_conv.weight, 0.)
         nn.init.constant_(self.offset_conv.bias, 0.)
 
         nn.init.constant_(self.mask_conv.weight, 0.)
         nn.init.constant_(self.mask_conv.bias, 0.)
+        # 1e-5  these init function is not valid in network
 
     def forward(self, x):
         offset = self.offset_conv(x)
@@ -141,6 +140,124 @@ class PartialConv2d(nn.Conv2d):
 
         raw_out = super(PartialConv2d, self).forward(
             torch.mul(input, mask) if mask_in is not None else input)
+
+        if self.bias is not None:
+            bias_view = self.bias.view(1, self.out_channels, 1, 1)
+            output = torch.mul(raw_out - bias_view, self.mask_ratio) + bias_view
+            output = torch.mul(output, self.update_mask)
+        else:
+            output = torch.mul(raw_out, self.mask_ratio)
+
+        if self.return_mask:
+            return output, self.update_mask
+        else:
+            return output
+
+
+class DefNorConv2d(nn.Module):
+    def __init__(self, in_channels,
+                 out_channels,
+                 kernel_size=(3, 3),
+                 stride=1,
+                 padding=1,
+                 groups=1,
+                 bias=True):
+        super(DefNorConv2d, self).__init__()
+        # super().__init__()
+        self.multi_channel = False
+        self.return_mask = True
+        self.out_channels = out_channels
+        if self.multi_channel:
+            self.weight_maskUpdater = torch.ones(self.out_channels, self.in_channels, kernel_size[0],
+                                                 kernel_size[1])
+        else:
+            self.weight_maskUpdater = torch.ones(1, 1, kernel_size[0], kernel_size[1])
+
+        self.slide_winsize = self.weight_maskUpdater.shape[1] * self.weight_maskUpdater.shape[2] * \
+                             self.weight_maskUpdater.shape[3]
+        # slide windows size
+
+        self.last_size = (None, None, None, None)
+        self.update_mask = None
+        self.mask_ratio = None
+        self.padding = padding
+
+        # for DCN
+        self.weight = nn.Parameter(
+            torch.Tensor(out_channels, in_channels, kernel_size[0],
+                         kernel_size[1]))
+        if bias:
+            self.bias = nn.Parameter(torch.Tensor(out_channels))
+
+        self.offset_conv = nn.Conv2d(in_channels + 1,
+                                     2 * groups * kernel_size[0] *
+                                     kernel_size[1],
+                                     kernel_size=kernel_size,
+                                     stride=stride,
+                                     padding=self.padding,
+                                     bias=True)
+
+        self.mask_conv = nn.Conv2d(in_channels + 1,
+                                   1 * groups * kernel_size[0] *
+                                   kernel_size[1],
+                                   kernel_size=kernel_size,
+                                   stride=stride,
+                                   padding=self.padding,
+                                   bias=True)
+
+        n = in_channels
+        for k in kernel_size:
+            n *= k
+        stdv = 1. / math.sqrt(n)
+        self.weight.data.uniform_(-stdv, stdv)
+        if bias:
+            self.bias.data.zero_()
+        self.stride = stride
+
+    def forward(self, input, mask_in=None):
+        assert len(input.shape) == 4
+        offset = self.offset_conv(torch.cat((input, mask_in), dim=1))
+
+        if mask_in is not None or self.last_size != tuple(input.shape):
+            self.last_size = tuple(input.shape)
+
+            with torch.no_grad():
+                if self.weight_maskUpdater.type() != input.type():
+                    self.weight_maskUpdater = self.weight_maskUpdater.to(input)
+
+                if mask_in is None:
+                    # if mask is not provided, create a mask
+                    if self.multi_channel:
+                        mask = torch.ones(input.data.shape[0], input.data.shape[1], input.data.shape[2],
+                                          input.data.shape[3]).to(input)
+                    else:
+                        mask = torch.ones(1, 1, input.data.shape[2], input.data.shape[3]).to(input)
+                else:
+                    mask = mask_in
+                self.update_mask = torchvision.ops.deform_conv2d(input=mask,
+                                                                 offset=offset,
+                                                                 weight=self.weight_maskUpdater,
+                                                                 bias=None,
+                                                                 padding=self.padding,
+                                                                 mask=None,
+                                                                 stride=self.stride,
+                                                                 dilation=1)
+
+            self.mask_ratio = self.slide_winsize / (self.update_mask + 1e-8)
+            # self.mask_ratio = torch.max(self.update_mask)/(self.update_mask + 1e-8)
+            self.update_mask = torch.clamp(self.update_mask, 0, 1)
+            self.mask_ratio = torch.mul(self.mask_ratio, self.update_mask)
+
+        # DCN + Partial Conv
+        dcn_mask = torch.sigmoid(self.mask_conv(torch.cat((input, mask_in), dim=1)))
+
+        raw_out = torchvision.ops.deform_conv2d(input=input,
+                                                offset=offset,
+                                                weight=self.weight,
+                                                bias=self.bias,
+                                                padding=self.padding,
+                                                mask=dcn_mask,
+                                                stride=self.stride)
 
         if self.bias is not None:
             bias_view = self.bias.view(1, self.out_channels, 1, 1)
@@ -268,20 +385,20 @@ class SEModule(nn.Module):
     Output:Squeeze and Excitation output
     """
 
-    def __init__(self, n_features,spectral_norm=True, reduction=16):
+    def __init__(self, n_features, spectral_norm=True, reduction=16):
         super(SEModule, self).__init__()
-        if n_features %reduction ==3:
-            reduction=1
+        if n_features % reduction == 3:
+            reduction = 1
         if n_features % reduction != 0:
             raise ValueError('n_features must be divisible by reduction (default = 16)')
 
         self.linear1 = nn.Linear(n_features, n_features // reduction, bias=True)
         if spectral_norm:
-            self.linear1=nn.utils.spectral_norm(self.linear1)
+            self.linear1 = nn.utils.spectral_norm(self.linear1)
         self.nonlin1 = nn.ReLU(inplace=True)
         self.linear2 = nn.Linear(n_features // reduction, n_features, bias=True)
         if spectral_norm:
-            self.linear2=nn.utils.spectral_norm(self.linear2)
+            self.linear2 = nn.utils.spectral_norm(self.linear2)
         self.nonlin2 = nn.Sigmoid()
 
     def forward(self, x):
@@ -308,10 +425,11 @@ class CFSModule(nn.Module):
         self.conv2d = torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias)
         self.mask_conv2d = torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups,
                                            bias)
-        self.same_conv2d = torch.nn.Conv2d(in_channels, in_channels, kernel_size, 1, int((kernel_size - 1)* dilation/ 2),
+        self.same_conv2d = torch.nn.Conv2d(in_channels, in_channels, kernel_size, 1,
+                                           int((kernel_size - 1) * dilation / 2),
                                            dilation, groups,
                                            bias)
-        self.sqex = SEModule(out_channels,spectral_norm)
+        self.sqex = SEModule(out_channels, spectral_norm)
         self.sigmoid = torch.nn.Sigmoid()
         if spectral_norm:
             self.conv2d = nn.utils.spectral_norm(self.conv2d)
@@ -337,7 +455,7 @@ class CFSModule(nn.Module):
             h = self.activation(x) * mask
             h = self.sqex(h)
         else:
-            h = x * mask            # no activation and no SE in last layer
+            h = x * mask  # no activation and no SE in last layer
         if hasattr(self, 'bn'):
             h = self.bn(h)
         return h

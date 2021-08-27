@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from ablation.network_fusion import RFFNet_fusion
-from .networks import Discriminator, UnetGenerator, UnetLeakyRes, DUnetGenerator, DUnetLink
+from .networks import Discriminator, UnetGenerator, UnetLeakyRes, DUnetGenerator, DUnetLink, DefNorGenerator
 from .loss import AdversarialLoss, PerceptualLoss, StyleLoss
 
 
@@ -63,10 +63,12 @@ class InpaintingModel(BaseModel):
 
         # generator input: [rgb(3) + edge(1)+mask(1)]
         # discriminator input: [rgb(3)]
-        generator = DUnetLink()
+        # generator = DUnetLink()
+        generator = DefNorGenerator()
         # generator=DUnetGenerator()       # Unet-lile generator
         # generator=UnetLeakyRes()
-        print("This Model Total params: {:.2f} M".format(sum([param.nelement() for param in generator.parameters()])/1024/1024))
+        print("This Model Total params: {:.2f} M".format(
+            sum([param.nelement() for param in generator.parameters()]) / 1024 / 1024))
         # summary(generator, (3, 256, 256), 6,device='cpu')
         # print(generator)
         discriminator = Discriminator(in_channels=3, use_sigmoid=config.GAN_LOSS != 'hinge')
@@ -172,8 +174,9 @@ class InpaintingModel(BaseModel):
     def forward(self, images, masks):
         # images_masked = (images * (1 - masks).float()) + masks
         images_masked = (images * (masks).float())
-        inputs = images_masked
-        outputs = self.generator(inputs)  # in: [rgb(3)]
+        # inputs = images_masked
+        # inputs = images_masked,masks
+        outputs = self.generator(images_masked,masks)  # in: [rgb(3)]
         return outputs
 
     def backward(self, gen_loss=None, dis_loss=None):

@@ -4,7 +4,8 @@ import torch.nn as nn
 import torch.optim as optim
 
 from ablation.network_fusion import RFFNet_fusion
-from .networks import Discriminator, UnetGenerator, UnetLeakyRes, DUnetGenerator, DUnetLink, DefNorGenerator
+from .networks import Discriminator, UnetGenerator, UnetLeakyRes, DUnetGenerator, DUnetLink, DefNorGenerator, \
+    DefSepGenerator
 from .loss import AdversarialLoss, PerceptualLoss, StyleLoss
 
 
@@ -64,7 +65,8 @@ class InpaintingModel(BaseModel):
         # generator input: [rgb(3) + edge(1)+mask(1)]
         # discriminator input: [rgb(3)]
         # generator = DUnetLink()
-        generator = DefNorGenerator()
+        generator = DefSepGenerator()
+        # generator = DefNorGenerator()
         # generator=DUnetGenerator()       # Unet-lile generator
         # generator=UnetLeakyRes()
         print("This Model Total params: {:.2f} M".format(

@@ -168,13 +168,13 @@ class DefNorConv2d(nn.Module):
         self.return_mask = True
         self.out_channels = out_channels
         if self.multi_channel:
-            self.weight_maskUpdater = torch.ones(self.out_channels, self.in_channels, kernel_size[0],
+            self.weight_maskUpdater = torch.ones(self.out_channels * groups, self.in_channels, kernel_size[0],
                                                  kernel_size[1])
         else:
-            self.weight_maskUpdater = torch.ones(1, 1, kernel_size[0], kernel_size[1])
+            self.weight_maskUpdater = torch.ones(1 * groups, in_channels, kernel_size[0], kernel_size[1])
 
         self.slide_winsize = self.weight_maskUpdater.shape[1] * self.weight_maskUpdater.shape[2] * \
-                             self.weight_maskUpdater.shape[3]
+                             self.weight_maskUpdater.shape[3] * self.weight_maskUpdater.shape[0]
         # slide windows size
 
         self.last_size = (None, None, None, None)
@@ -189,13 +189,23 @@ class DefNorConv2d(nn.Module):
         if bias:
             self.bias = nn.Parameter(torch.Tensor(out_channels))
 
-        self.offset_conv = nn.Conv2d(in_channels + 1,
-                                     2 * groups * kernel_size[0] *
-                                     kernel_size[1],
-                                     kernel_size=kernel_size,
-                                     stride=stride,
-                                     padding=self.padding,
-                                     bias=True)
+        # self.offset_conv = nn.Conv2d(in_channels + 1,
+        #                              2 * groups * kernel_size[0] *
+        #                              kernel_size[1],
+        #                              kernel_size=kernel_size,
+        #                              stride=stride,
+        #                              padding=self.padding,
+        #                              bias=True)
+
+        self.mid_channel = (in_channels + 1)  # * 2
+        self.offset_conv = nn.Sequential(
+            # nn.Conv2d(in_channels + 1, self.mid_channel, 3, 1, 1),
+            # nn.LeakyReLU(negative_slope=0.1, inplace=True),
+            nn.Conv2d(self.mid_channel, 2 * groups * kernel_size[0] * kernel_size[1],
+                      kernel_size=kernel_size,
+                      stride=stride, padding=self.padding, bias=True)
+        )
+        # Basic++VSR的　self.out_channels==64,   group=16
 
         self.mask_conv = nn.Conv2d(in_channels + 1,
                                    1 * groups * kernel_size[0] *
@@ -227,13 +237,14 @@ class DefNorConv2d(nn.Module):
 
                 if mask_in is None:
                     # if mask is not provided, create a mask
-                    if self.multi_channel:
-                        mask = torch.ones(input.data.shape[0], input.data.shape[1], input.data.shape[2],
-                                          input.data.shape[3]).to(input)
-                    else:
-                        mask = torch.ones(1, 1, input.data.shape[2], input.data.shape[3]).to(input)
+                    # if self.multi_channel:
+                    #     mask = torch.ones(input.data.shape[0], input.data.shape[1], input.data.shape[2],
+                    #                       input.data.shape[3]).to(input)
+                    # else:
+                    mask = torch.ones(1, 1, input.data.shape[2], input.data.shape[3]).to(input)
                 else:
                     mask = mask_in
+                mask = mask.repeat((1, input.data.shape[1], 1, 1))
                 self.update_mask = torchvision.ops.deform_conv2d(input=mask,
                                                                  offset=offset,
                                                                  weight=self.weight_maskUpdater,
@@ -242,7 +253,7 @@ class DefNorConv2d(nn.Module):
                                                                  mask=None,
                                                                  stride=self.stride,
                                                                  dilation=1)
-
+                self.update_mask = self.update_mask.sum(dim=1, keepdim=True)
             self.mask_ratio = self.slide_winsize / (self.update_mask + 1e-8)
             # self.mask_ratio = torch.max(self.update_mask)/(self.update_mask + 1e-8)
             self.update_mask = torch.clamp(self.update_mask, 0, 1)
@@ -258,14 +269,145 @@ class DefNorConv2d(nn.Module):
                                                 padding=self.padding,
                                                 mask=dcn_mask,
                                                 stride=self.stride)
-
-        if self.bias is not None:
-            bias_view = self.bias.view(1, self.out_channels, 1, 1)
-            output = torch.mul(raw_out - bias_view, self.mask_ratio) + bias_view
-            output = torch.mul(output, self.update_mask)
+        # 不用PartialConv的norm就注释
+        # if self.bias is not None:
+        #     bias_view = self.bias.view(1, self.out_channels, 1, 1)
+        #     output = torch.mul(raw_out - bias_view, self.mask_ratio) + bias_view
+        #     output = torch.mul(output, self.update_mask)
+        # else:
+        #     output = torch.mul(raw_out, self.mask_ratio)
+        # 不用PartialConv的norm
+        output = torch.mul(raw_out, self.update_mask)
+        if self.return_mask:
+            return output, self.update_mask
         else:
-            output = torch.mul(raw_out, self.mask_ratio)
+            return output
 
+
+class DefSeperateConv2d(nn.Module):
+    def __init__(self, in_channels,
+                 out_channels,
+                 kernel_size=(3, 3),
+                 stride=1,
+                 padding=1,
+                 groups=1,
+                 bias=True):
+        super(DefSeperateConv2d, self).__init__()
+        # super().__init__()
+        self.multi_channel = False
+        self.return_mask = True
+        self.out_channels = out_channels
+        if self.multi_channel:
+            self.weight_maskUpdater = torch.ones(self.out_channels * groups * 2, self.in_channels, kernel_size[0],
+                                                 kernel_size[1])
+        else:
+            self.weight_maskUpdater = torch.ones(1 * groups * 2, in_channels, kernel_size[0], kernel_size[1])
+
+        # slide windows size
+
+        self.last_size = (None, None, None, None)
+        self.update_mask = None
+        self.mask_ratio = None
+        self.padding = padding
+
+        # for DCN
+        self.weight = nn.Parameter(
+            torch.Tensor(out_channels, in_channels, kernel_size[0],
+                         kernel_size[1]))
+        if bias:
+            self.bias = nn.Parameter(torch.Tensor(out_channels))
+
+        # self.offset_conv = nn.Conv2d(in_channels + 1,
+        #                              2 * groups * kernel_size[0] *
+        #                              kernel_size[1],
+        #                              kernel_size=kernel_size,
+        #                              stride=stride,
+        #                              padding=self.padding,
+        #                              bias=True)
+
+        self.semantic_offset_conv = nn.Sequential(
+            nn.Conv2d(in_channels, 2 * groups * kernel_size[0] * kernel_size[1],
+                      kernel_size=kernel_size,
+                      stride=stride, padding=self.padding, bias=True)
+        )
+
+        self.region_offset_conv = nn.Sequential(
+            nn.Conv2d(1, 2 * groups * kernel_size[0] * kernel_size[1],
+                      kernel_size=kernel_size,
+                      stride=stride, padding=self.padding, bias=True)
+        )
+        # Basic++VSR的　self.out_channels==64,   group=16
+
+        self.mask_conv_2 = nn.Conv2d(in_channels,
+                                     1 * groups * kernel_size[0] *
+                                     kernel_size[1],
+                                     kernel_size=kernel_size,
+                                     stride=stride,
+                                     padding=self.padding,
+                                     bias=True)
+        self.mask_conv = nn.Conv2d(1,
+                                   1 * groups * kernel_size[0] *
+                                   kernel_size[1],
+                                   kernel_size=kernel_size,
+                                   stride=stride,
+                                   padding=self.padding,
+                                   bias=True)
+
+        n = in_channels
+        for k in kernel_size:
+            n *= k
+        stdv = 1. / math.sqrt(n)
+        self.weight.data.uniform_(-stdv, stdv)
+        if bias:
+            self.bias.data.zero_()
+        self.stride = stride
+
+    def forward(self, input, mask_in=None):
+        assert len(input.shape) == 4
+        region_offset = self.region_offset_conv(mask_in)
+        semantic_offset = self.semantic_offset_conv(input)
+        offset = torch.cat((region_offset, semantic_offset), dim=1)
+        if mask_in is not None or self.last_size != tuple(input.shape):
+            self.last_size = tuple(input.shape)
+
+            with torch.no_grad():
+                if self.weight_maskUpdater.type() != input.type():
+                    self.weight_maskUpdater = self.weight_maskUpdater.to(input)
+
+                if mask_in is None:
+                    # if mask is not provided, create a mask
+                    # if self.multi_channel:
+                    #     mask = torch.ones(input.data.shape[0], input.data.shape[1], input.data.shape[2],
+                    #                       input.data.shape[3]).to(input)
+                    # else:
+                    mask = torch.ones(1, 1, input.data.shape[2], input.data.shape[3]).to(input)
+                else:
+                    mask = mask_in
+                mask = mask.repeat((1, input.data.shape[1], 1, 1))
+                self.update_mask = torchvision.ops.deform_conv2d(input=mask,
+                                                                 offset=offset,
+                                                                 weight=self.weight_maskUpdater,
+                                                                 bias=None,
+                                                                 padding=self.padding,
+                                                                 mask=None,
+                                                                 stride=self.stride,
+                                                                 dilation=1)
+                self.update_mask = self.update_mask.sum(dim=1, keepdim=True)
+                self.update_mask = torch.clamp(self.update_mask, 0, 1)
+
+        # DCN + Partial Conv
+        dcn_mask_1 = torch.sigmoid(self.mask_conv(mask_in))
+        dcn_mask_2 = torch.sigmoid(self.mask_conv_2(input))
+        dcn_mask = torch.cat((dcn_mask_1, dcn_mask_2), dim=1)
+
+        raw_out = torchvision.ops.deform_conv2d(input=input,
+                                                offset=offset,
+                                                weight=self.weight,
+                                                bias=self.bias,
+                                                padding=self.padding,
+                                                mask=dcn_mask,
+                                                stride=self.stride)
+        output = torch.mul(raw_out, self.update_mask)
         if self.return_mask:
             return output, self.update_mask
         else:

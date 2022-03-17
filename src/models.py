@@ -5,8 +5,8 @@ import torch.optim as optim
 
 from ablation.network_fusion import RFFNet_fusion
 from .networks import Discriminator, UnetGenerator, UnetLeakyRes, DUnetGenerator, DUnetLink, DefNorGenerator, \
-    DefSepGenerator
-from .loss import AdversarialLoss, PerceptualLoss, StyleLoss
+    DefSepGenerator, DefSepGenerator_NoNor, DefSepGenerator_NoNor_SkipLink, DefSepGenerator_NoNor_SimpleLink
+from .loss import AdversarialLoss, PerceptualLoss, StyleLoss, PoissonLoss
 
 
 class BaseModel(nn.Module):
@@ -65,7 +65,8 @@ class InpaintingModel(BaseModel):
         # generator input: [rgb(3) + edge(1)+mask(1)]
         # discriminator input: [rgb(3)]
         # generator = DUnetLink()
-        generator = DefSepGenerator()
+        # generator = DefSepGenerator()
+        generator = DefSepGenerator_NoNor_SimpleLink()
         # generator = DefNorGenerator()
         # generator=DUnetGenerator()       # Unet-lile generator
         # generator=UnetLeakyRes()
@@ -82,7 +83,7 @@ class InpaintingModel(BaseModel):
         perceptual_loss = PerceptualLoss()
         style_loss = StyleLoss()
         adversarial_loss = AdversarialLoss(type=config.GAN_LOSS)
-
+        poisson_loss = PoissonLoss()
         self.add_module('generator', generator)
         self.add_module('discriminator', discriminator)
 
@@ -90,6 +91,7 @@ class InpaintingModel(BaseModel):
         self.add_module('perceptual_loss', perceptual_loss)
         self.add_module('style_loss', style_loss)
         self.add_module('adversarial_loss', adversarial_loss)
+        self.add_module('poisson_loss', poisson_loss)
 
         self.gen_optimizer = optim.Adam(
             params=generator.parameters(),
@@ -155,6 +157,12 @@ class InpaintingModel(BaseModel):
         gen_style_loss = gen_style_loss * self.config.STYLE_LOSS_WEIGHT
         gen_loss += gen_style_loss
 
+        gen_poisson_loss = torch.tensor(0)
+        if self.config.POISSON_LOSS_WEIGHT > 0:
+            gen_poisson_loss = self.poisson_loss(outputs, images, masks)
+            gen_poisson_loss = gen_poisson_loss * self.config.POISSON_LOSS_WEIGHT
+            gen_loss += gen_poisson_loss
+
         # create logs
         logs = {
             "l_d2": dis_loss.item(),
@@ -162,7 +170,8 @@ class InpaintingModel(BaseModel):
             "l_l1": gen_l1_loss.item(),
             "l_fm": gen_fm_loss.item(),
             "l_per": gen_content_loss.item(),
-            "l_sty": gen_style_loss.item()
+            "l_sty": gen_style_loss.item(),
+            'l_poisson': gen_poisson_loss.item()
         }
 
         if not self.training:
@@ -178,7 +187,7 @@ class InpaintingModel(BaseModel):
         images_masked = (images * (masks).float())
         # inputs = images_masked
         # inputs = images_masked,masks
-        outputs = self.generator(images_masked,masks)  # in: [rgb(3)]
+        outputs = self.generator(images_masked, masks)  # in: [rgb(3)]
         return outputs
 
     def backward(self, gen_loss=None, dis_loss=None):

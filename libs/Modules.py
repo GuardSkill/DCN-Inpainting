@@ -1,12 +1,4 @@
-###############################################################################
-# BSD 3-Clause License
-#
-# Copyright (c) 2018, NVIDIA CORPORATION. All rights reserved.
-#
-# Author & Contact: Guilin Liu (guilinl@nvidia.com)
-###############################################################################
 import math
-
 import torch
 import torch.nn.functional as F
 import torchvision

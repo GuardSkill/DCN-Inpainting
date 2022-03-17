@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torchvision.models as models
+import numpy as np
 
 
 class AdversarialLoss(nn.Module):
@@ -227,3 +228,35 @@ class VGG19(torch.nn.Module):
             'relu5_4': relu5_4,
         }
         return out
+
+
+import torch.nn.functional as F
+
+
+# class PoissonLoss(torch.nn.Module)
+class PoissonLoss(nn.Module):
+    def __init__(self, channels=3):
+        super(PoissonLoss, self).__init__()
+        laplacian_filter = np.array([[0, -1, 0], [-1, 4, -1], [0, -1, 0]])
+        # tenor.view(1, 1, *self.laplacian_filter.size())
+        tensor_laplacian_filter = torch.from_numpy(laplacian_filter).float().unsqueeze(0).unsqueeze(0)
+        tensor_laplacian_filter = tensor_laplacian_filter.repeat(channels,
+                                                                 *[1] * (tensor_laplacian_filter.dim() - 1))
+        self.laplacian_weight = nn.Parameter(tensor_laplacian_filter)
+        self.conv = F.conv2d
+        self.groups = channels  # must ==channels(3)
+        # for param in self.laplacian_weight:
+        #     param.requires_grad = False
+        self.criterion = torch.nn.L1Loss()
+
+    def __call__(self, x, y, mask):
+        # Compute features
+        mask = torch.cat([mask, mask, mask], dim=1)
+        # x = F.pad(x, (1, 1, 1, 1), 'replicate')
+        # y = F.pad(y, (1, 1, 1, 1), 'replicate')
+        composite = x * mask + y * (1 - mask)
+        g_composite = self.conv(composite, weight=self.laplacian_weight, groups=self.groups)
+        g_y = self.conv(y, weight=self.laplacian_weight, groups=self.groups)
+
+        poisson_loss = self.criterion(g_composite, g_y) * mask.numel() / mask.sum()
+        return poisson_loss

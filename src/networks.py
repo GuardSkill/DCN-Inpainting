@@ -378,25 +378,101 @@ class DefNorGenerator(BaseNetwork):
         return x
 
 
+# front+some_middle
 class DefSepGenerator(BaseNetwork):
-    def __init__(self, residual_blocks=8, init_weights=True):
+    def __init__(self, residual_blocks=4, init_weights=True):
         super(DefSepGenerator, self).__init__()
         inplace_flag = True
+        # self.enc1 = PartialModule(in_channels=3, out_channels=64, kernel_size=(7, 7), padding=3, groups=1)
         self.enc1 = DefNorConv2d(in_channels=3, out_channels=64, kernel_size=(7, 7), padding=3, groups=1)
         self.norm1 = nn.InstanceNorm2d(64, track_running_stats=False)
         self.activation = nn.ReLU(inplace_flag)
 
-        self.enc2 = DefSeperateConv2d(in_channels=64, out_channels=128, kernel_size=(4, 4), stride=2, padding=1, groups=1)
+        # self.enc2 = PartialModule(in_channels=64, out_channels=128, kernel_size=(4, 4), stride=2, padding=1, groups=1)
+        self.enc2 = DefSeperateConv2d(in_channels=64, out_channels=128, kernel_size=(4, 4), stride=2, padding=1,
+                                      groups=1)
         self.norm2 = nn.InstanceNorm2d(128, track_running_stats=False)
 
         # nn.Conv2d(in_channels=128, out_channels=256, kernel_size=4, stride=2, padding=1),
-        self.enc3 = DefSeperateConv2d(in_channels=128, out_channels=256, kernel_size=(4, 4), stride=2, padding=1, groups=1)
+        # self.enc3 = PartialModule(in_channels=128, out_channels=256, kernel_size=(4, 4), stride=2, padding=1, groups=1)
+        self.enc3 = DefSeperateConv2d(in_channels=128, out_channels=256, kernel_size=(4, 4), stride=2, padding=1,
+                                      groups=1)
+        self.norm3 = nn.InstanceNorm2d(256, track_running_stats=False)
+
+        # blocks = []
+        def_blocks = nn.ModuleList()
+        blocks = nn.ModuleList()
+        for _ in range(residual_blocks):
+            def_block = DefSepResBlock(256)
+            def_blocks.append(def_block)
+        for _ in range(residual_blocks):
+            block = ResnetBlock(256)
+            # self.add_module(f'conv{i}', conv)
+            blocks.append(block)
+
+        # self.middle = nn.Sequential(*blocks)
+        self.middle_def = def_blocks
+        self.middle = blocks
+
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=256, out_channels=128, kernel_size=4, stride=2, padding=1),
+            nn.InstanceNorm2d(128, track_running_stats=False),
+            nn.ReLU(inplace_flag),
+
+            nn.ConvTranspose2d(in_channels=128, out_channels=64, kernel_size=4, stride=2, padding=1),
+            nn.InstanceNorm2d(64, track_running_stats=False),
+            nn.ReLU(inplace_flag),
+
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(in_channels=64, out_channels=3, kernel_size=7, padding=0),
+        )
+
+        if init_weights:
+            self.init_weights()
+
+    def forward(self, input, mask_in):
+        # mask_in = mask_in.repeat_interleave(3, dim=1)
+        x, mask = self.enc1(input, mask_in)
+        x, mask = self.enc2(self.activation(self.norm1(x)), mask)
+        x, mask = self.enc3(self.activation(self.norm2(x)), mask)
+        # mask = mask[:, :1, :, :]
+        x = self.activation(self.norm3(x))
+        for b in self.middle_def:
+            x,mask = b(x,mask)
+        for b in self.middle:
+            x = b(x)
+        x = self.decoder(x)
+        x = (torch.tanh(x) + 1) / 2
+
+        return x
+
+
+# defMask G1 seperate (sep_in_front)
+class DefSepGenerator_front(BaseNetwork):
+    def __init__(self, residual_blocks=8, init_weights=True):
+        super(DefSepGenerator_front, self).__init__()
+        inplace_flag = True
+        # self.enc1 = PartialModule(in_channels=3, out_channels=64, kernel_size=(7, 7), padding=3, groups=1)
+        self.enc1 = DefNorConv2d(in_channels=3, out_channels=64, kernel_size=(7, 7), padding=3, groups=1)
+        self.norm1 = nn.InstanceNorm2d(64, track_running_stats=False)
+        self.activation = nn.ReLU(inplace_flag)
+
+        # self.enc2 = PartialModule(in_channels=64, out_channels=128, kernel_size=(4, 4), stride=2, padding=1, groups=1)
+        self.enc2 = DefSeperateConv2d(in_channels=64, out_channels=128, kernel_size=(4, 4), stride=2, padding=1,
+                                      groups=1)
+        self.norm2 = nn.InstanceNorm2d(128, track_running_stats=False)
+
+        # nn.Conv2d(in_channels=128, out_channels=256, kernel_size=4, stride=2, padding=1),
+        # self.enc3 = PartialModule(in_channels=128, out_channels=256, kernel_size=(4, 4), stride=2, padding=1, groups=1)
+        self.enc3 = DefSeperateConv2d(in_channels=128, out_channels=256, kernel_size=(4, 4), stride=2, padding=1,
+                                      groups=1)
         self.norm3 = nn.InstanceNorm2d(256, track_running_stats=False)
 
         # blocks = []
         blocks = nn.ModuleList()
         for _ in range(residual_blocks):
-            block = DefSepResBlock(256)
+            # block = DefSepResBlock(256)
+            block = ResnetBlock(256)
             # self.add_module(f'conv{i}', conv)
             blocks.append(block)
 
@@ -420,9 +496,74 @@ class DefSepGenerator(BaseNetwork):
             self.init_weights()
 
     def forward(self, input, mask_in):
+        # mask_in = mask_in.repeat_interleave(3, dim=1)
         x, mask = self.enc1(input, mask_in)
         x, mask = self.enc2(self.activation(self.norm1(x)), mask)
         x, mask = self.enc3(self.activation(self.norm2(x)), mask)
+        # mask = mask[:, :1, :, :]
+        x = self.activation(self.norm3(x))
+        for b in self.middle:
+            x = b(x)
+        x = self.decoder(x)
+        x = (torch.tanh(x) + 1) / 2
+
+        return x
+
+
+# defMask G1 seperate
+class DefSepGenerator_standard(BaseNetwork):
+    def __init__(self, residual_blocks=8, init_weights=True):
+        super(DefSepGenerator_standard, self).__init__()
+        inplace_flag = True
+        # self.enc1 = PartialModule(in_channels=3, out_channels=64, kernel_size=(7, 7), padding=3, groups=1)
+        self.enc1 = DefNorConv2d(in_channels=3, out_channels=64, kernel_size=(7, 7), padding=3, groups=1)
+        self.norm1 = nn.InstanceNorm2d(64, track_running_stats=False)
+        self.activation = nn.ReLU(inplace_flag)
+
+        # self.enc2 = PartialModule(in_channels=64, out_channels=128, kernel_size=(4, 4), stride=2, padding=1, groups=1)
+        self.enc2 = DefSeperateConv2d(in_channels=64, out_channels=128, kernel_size=(4, 4), stride=2, padding=1,
+                                      groups=1)
+        self.norm2 = nn.InstanceNorm2d(128, track_running_stats=False)
+
+        # nn.Conv2d(in_channels=128, out_channels=256, kernel_size=4, stride=2, padding=1),
+        # self.enc3 = PartialModule(in_channels=128, out_channels=256, kernel_size=(4, 4), stride=2, padding=1, groups=1)
+        self.enc3 = DefSeperateConv2d(in_channels=128, out_channels=256, kernel_size=(4, 4), stride=2, padding=1,
+                                      groups=1)
+        self.norm3 = nn.InstanceNorm2d(256, track_running_stats=False)
+
+        # blocks = []
+        blocks = nn.ModuleList()
+        for _ in range(residual_blocks):
+            block = DefSepResBlock(256)
+            # block = ResnetBlock(256)
+            # self.add_module(f'conv{i}', conv)
+            blocks.append(block)
+
+        # self.middle = nn.Sequential(*blocks)
+        self.middle = blocks
+
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=256, out_channels=128, kernel_size=4, stride=2, padding=1),
+            nn.InstanceNorm2d(128, track_running_stats=False),
+            nn.ReLU(inplace_flag),
+
+            nn.ConvTranspose2d(in_channels=128, out_channels=64, kernel_size=4, stride=2, padding=1),
+            nn.InstanceNorm2d(64, track_running_stats=False),
+            nn.ReLU(inplace_flag),
+
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(in_channels=64, out_channels=3, kernel_size=7, padding=0),
+        )
+
+        if init_weights:
+            self.init_weights()
+
+    def forward(self, input, mask_in):
+        # mask_in = mask_in.repeat_interleave(3, dim=1)
+        x, mask = self.enc1(input, mask_in)
+        x, mask = self.enc2(self.activation(self.norm1(x)), mask)
+        x, mask = self.enc3(self.activation(self.norm2(x)), mask)
+        # mask = mask[:, :1, :, :]
         x = self.activation(self.norm3(x))
         for b in self.middle:
             x, mask = b(x, mask)
@@ -431,6 +572,194 @@ class DefSepGenerator(BaseNetwork):
 
         return x
 
+
+class DefSepGenerator_NoNor(BaseNetwork):
+    def __init__(self, residual_blocks=8, init_weights=True):
+        super(DefSepGenerator_NoNor, self).__init__()
+        inplace_flag = True
+        # self.enc1 = PartialModule(in_channels=3, out_channels=64, kernel_size=(7, 7), padding=3, groups=1)
+        self.enc1 = DefNorConv2d(in_channels=3, out_channels=64, kernel_size=(7, 7), padding=3, groups=1)
+        self.activation = nn.ReLU(inplace_flag)
+
+        # self.enc2 = PartialModule(in_channels=64, out_channels=128, kernel_size=(4, 4), stride=2, padding=1, groups=1)
+        self.enc2 = DefSeperateConv2d(in_channels=64, out_channels=128, kernel_size=(4, 4), stride=2, padding=1,
+                                      groups=1)
+
+        # nn.Conv2d(in_channels=128, out_channels=256, kernel_size=4, stride=2, padding=1),
+        # self.enc3 = PartialModule(in_channels=128, out_channels=256, kernel_size=(4, 4), stride=2, padding=1, groups=1)
+        self.enc3 = DefSeperateConv2d(in_channels=128, out_channels=256, kernel_size=(4, 4), stride=2, padding=1,
+                                      groups=1)
+        # blocks = []
+        blocks = nn.ModuleList()
+        for _ in range(residual_blocks):
+            block = DefSepResBlock(256)
+            # block = ResnetBlock(256)
+            # self.add_module(f'conv{i}', conv)
+            blocks.append(block)
+
+        # self.middle = nn.Sequential(*blocks)
+        self.middle = blocks
+
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=256, out_channels=128, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(inplace_flag),
+
+            nn.ConvTranspose2d(in_channels=128, out_channels=64, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(inplace_flag),
+
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(in_channels=64, out_channels=3, kernel_size=7, padding=0),
+        )
+
+        if init_weights:
+            self.init_weights()
+
+    def forward(self, input, mask_in):
+        # mask_in = mask_in.repeat_interleave(3, dim=1)
+        x, mask = self.enc1(input, mask_in)
+        x, mask = self.enc2(self.activation(x), mask)
+        x, mask = self.enc3(self.activation(x), mask)
+        # mask = mask[:, :1, :, :]
+        x = self.activation(x)
+        for b in self.middle:
+            x, mask = b(x, mask)
+        x = self.decoder(x)
+        x = (torch.tanh(x) + 1) / 2
+
+        return x
+
+
+class DefSepGenerator_NoNor_SkipLink(BaseNetwork):
+    def __init__(self, residual_blocks=8, init_weights=True):
+        super(DefSepGenerator_NoNor_SkipLink, self).__init__()
+        inplace_flag = True
+        self.activation = nn.ReLU(inplace_flag)
+        # self.enc1 = PartialModule(in_channels=3, out_channels=64, kernel_size=(7, 7), padding=3, groups=1)
+        self.enc1 = DefNorConv2d(in_channels=3, out_channels=64, kernel_size=(7, 7), padding=3, groups=1)
+        self.link1 = DefSeperateConv2d(in_channels=64, out_channels=64, kernel_size=(3, 3), padding=1, groups=1)
+
+
+        # self.enc2 = PartialModule(in_channels=64, out_channels=128, kernel_size=(4, 4), stride=2, padding=1, groups=1)
+        self.enc2 = DefSeperateConv2d(in_channels=64, out_channels=128, kernel_size=(4, 4), stride=2, padding=1,
+                                      groups=1)
+        self.link2 =DefSeperateConv2d(in_channels=128, out_channels=128, kernel_size=(3, 3), padding=1,groups=1)
+        # nn.Conv2d(in_channels=128, out_channels=256, kernel_size=4, stride=2, padding=1),
+        # self.enc3 = PartialModule(in_channels=128, out_channels=256, kernel_size=(4, 4), stride=2, padding=1, groups=1)
+        self.enc3 = DefSeperateConv2d(in_channels=128, out_channels=256, kernel_size=(4, 4), stride=2, padding=1,
+                                      groups=1)
+        self.link3 = DefSeperateConv2d(in_channels=256, out_channels=256, kernel_size=(3, 3),padding=1,  groups=1)
+        # blocks = []
+        blocks = nn.ModuleList()
+        for _ in range(residual_blocks):
+            block = DefSepResBlock(256)
+            # block = ResnetBlock(256)
+            # self.add_module(f'conv{i}', conv)
+            blocks.append(block)
+
+        # self.middle = nn.Sequential(*blocks)
+        self.middle = blocks
+
+        self.dec3 = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=256, out_channels=128, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(inplace_flag),
+        )
+        self.dec2 = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=128, out_channels=64, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(inplace_flag),
+        )
+        self.dec1 = nn.Sequential(
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(in_channels=64, out_channels=3, kernel_size=7, padding=0),
+        )
+
+        if init_weights:
+            self.init_weights()
+
+    def forward(self, input, mask_in):
+        # mask_in = mask_in.repeat_interleave(3, dim=1)
+        enc1, mask1 = self.enc1(input, mask_in)
+        enc2, mask2 = self.enc2(self.activation(enc1), mask1)
+        enc3, mask3 = self.enc3(self.activation(enc2), mask2)
+        # mask = mask[:, :1, :, :]
+        mask=torch.clone(mask3)
+        x = self.activation(enc3)
+        for b in self.middle:
+            x, mask = b(x, mask)
+        res,_=self.link3(enc3,mask3)
+        x = self.dec3(x+res)
+        res, _ = self.link2(enc2, mask2)
+        x = self.dec2(x+res)
+        res, _ = self.link1(enc1, mask1)
+        x = self.dec1(x+res)
+        x = (torch.tanh(x) + 1) / 2
+
+        return x
+
+class DefSepGenerator_NoNor_SimpleLink(BaseNetwork):
+    def __init__(self, residual_blocks=8, init_weights=True):
+        super(DefSepGenerator_NoNor_SimpleLink, self).__init__()
+        inplace_flag = True
+        self.activation = nn.ReLU(inplace_flag)
+        # self.enc1 = PartialModule(in_channels=3, out_channels=64, kernel_size=(7, 7), padding=3, groups=1)
+        self.enc1 = DefNorConv2d(in_channels=3, out_channels=64, kernel_size=(7, 7), padding=3, groups=1)
+        self.link1 = PartialModule(in_channels=64, out_channels=64, kernel_size=(3, 3), padding=1, groups=1,multi_channel=False)
+
+
+        # self.enc2 = PartialModule(in_channels=64, out_channels=128, kernel_size=(4, 4), stride=2, padding=1, groups=1)
+        self.enc2 = DefSeperateConv2d(in_channels=64, out_channels=128, kernel_size=(4, 4), stride=2, padding=1,
+                                      groups=1)
+        self.link2 =PartialModule(in_channels=128, out_channels=128, kernel_size=(3, 3), padding=1,groups=1,multi_channel=False)
+        # nn.Conv2d(in_channels=128, out_channels=256, kernel_size=4, stride=2, padding=1),
+        # self.enc3 = PartialModule(in_channels=128, out_channels=256, kernel_size=(4, 4), stride=2, padding=1, groups=1)
+        self.enc3 = DefSeperateConv2d(in_channels=128, out_channels=256, kernel_size=(4, 4), stride=2, padding=1,
+                                      groups=1)
+        self.link3 = PartialModule(in_channels=256, out_channels=256, kernel_size=(3, 3),padding=1,  groups=1,multi_channel=False)
+        # blocks = []
+        blocks = nn.ModuleList()
+        for _ in range(residual_blocks):
+            block = DefSepResBlock(256)
+            # block = ResnetBlock(256)
+            # self.add_module(f'conv{i}', conv)
+            blocks.append(block)
+
+        # self.middle = nn.Sequential(*blocks)
+        self.middle = blocks
+
+        self.dec3 = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=256, out_channels=128, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(inplace_flag),
+        )
+        self.dec2 = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=128, out_channels=64, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(inplace_flag),
+        )
+        self.dec1 = nn.Sequential(
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(in_channels=64, out_channels=3, kernel_size=7, padding=0),
+        )
+
+        if init_weights:
+            self.init_weights()
+
+    def forward(self, input, mask_in):
+        # mask_in = mask_in.repeat_interleave(3, dim=1)
+        enc1, mask1 = self.enc1(input, mask_in)
+        enc2, mask2 = self.enc2(self.activation(enc1), mask1)
+        enc3, mask3 = self.enc3(self.activation(enc2), mask2)
+        # mask = mask[:, :1, :, :]
+        mask=torch.clone(mask3)
+        x = self.activation(enc3)
+        for b in self.middle:
+            x, mask = b(x, mask)
+        res,_=self.link3(enc3,mask3)
+        x = self.dec3(x+res)
+        res, _ = self.link2(enc2, mask2)
+        x = self.dec2(x+res)
+        res, _ = self.link1(enc1, mask1)
+        x = self.dec1(x+res)
+        x = (torch.tanh(x) + 1) / 2
+
+        return x
 
 class DUnetLink(BaseNetwork):
     def __init__(self, residual_blocks=8, init_weights=True):
